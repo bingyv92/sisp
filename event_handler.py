@@ -416,11 +416,49 @@ def _is_fatigue_phase(body_state: SISPBodyState) -> bool:
     return body_state.body_phase in {"extreme_fatigue", "general_fatigue"}
 
 
-def _entry_threshold(body_state: SISPBodyState) -> int:
+def _entry_threshold(body_state: SISPBodyState, config: "SISPConfig") -> int:
     """根据身体状态决定进入性爱模式所需的连续高分次数。"""
+    thresholds = config.thresholds
     if body_state.body_phase == "high_desire":
-        return 1
-    return 2
+        return max(1, thresholds.high_desire_entry_required_count)
+    return max(1, thresholds.entry_required_count)
+
+
+def _climax_event_for_y(y: float, config: "SISPConfig") -> str:
+    """根据配置的 y 值阈值选择高潮事件。"""
+    thresholds = config.thresholds
+    if y <= thresholds.mild_climax_y_max:
+        return "mild_climax"
+    if y <= thresholds.normal_climax_y_max:
+        return "normal_climax"
+    return "intense_climax"
+
+
+def _is_broken_stage(n: int, config: "SISPConfig") -> bool:
+    """判断当前 n 是否进入玩坏期。"""
+    enjoyment_count = max(0, config.thresholds.enjoyment_climax_count)
+    return n > enjoyment_count + 1
+
+
+def _is_beg_stage(n: int, config: "SISPConfig") -> bool:
+    """判断当前 n 是否为享受期结束后的单轮求饶期。"""
+    enjoyment_count = max(0, config.thresholds.enjoyment_climax_count)
+    return n == enjoyment_count + 1
+
+
+def _advance_beg_to_broken(state: SISPState, config: "SISPConfig") -> bool:
+    """将已宣告求饶的状态推进到玩坏期，返回是否发生推进。"""
+    if not (
+        state.in_sex_mode
+        and state.beg_announced
+        and state.current_event is None
+        and _is_beg_stage(state.n, config)
+    ):
+        return False
+
+    enjoyment_count = max(0, config.thresholds.enjoyment_climax_count)
+    state.n = enjoyment_count + 2
+    return True
 
 
 def _body_phase_prompt(
@@ -562,12 +600,15 @@ class SISPStateHandler(BaseEventHandler):
         loaded_body_state = await load_body_state(stream_id)
         stage_durations = _get_stage_durations(config)
         body_state = advance_body_phase(loaded_body_state, durations=stage_durations)
+        if _advance_beg_to_broken(state, config):
+            await save_state(stream_id, state)
         model_name = config.plugin.score_model
 
         if body_state.to_dict() != loaded_body_state.to_dict():
             await save_body_state(stream_id, body_state)
 
         score = await _score_message(stream_id, text, model_name)
+        thresholds = config.thresholds
 
         logger.info(
             f"[sisp] stream={stream_id[:8]} 评分前状态 score={score} "
@@ -576,9 +617,9 @@ class SISPStateHandler(BaseEventHandler):
 
         # ── 阶段一：未进入性爱模式 ──────────────────────────────────────────
         if not state.in_sex_mode:
-            if score >= 7:
+            if score >= thresholds.entry_score_min:
                 state.foreplay_count += 1
-                if state.foreplay_count >= _entry_threshold(body_state):
+                if state.foreplay_count >= _entry_threshold(body_state, config):
                     state = SISPState.new_sex_session()
                     if body_state.body_phase in {"mild_desire", "high_desire"}:
                         body_state = SISPBodyState()
@@ -607,14 +648,14 @@ class SISPStateHandler(BaseEventHandler):
         passive_mode = _is_fatigue_phase(body_state)
 
         # 优先判定：低意愿检测
-        if score < 5:
+        if score < thresholds.low_score_max_exclusive:
             state.low_score_count += 1
             logger.info(
                 f"[sisp] stream={stream_id[:8]} 低意愿累计 low_score_count={state.low_score_count} "
                 f"body_before={body_state.body_phase} passive={passive_mode} "
                 f"n={state.n} climax_count={state.climax_count}"
             )
-            if state.low_score_count >= 2:
+            if state.low_score_count >= thresholds.low_score_exit_count:
                 if not passive_mode:
                     if (
                         state.climax_count == 0
@@ -625,7 +666,7 @@ class SISPStateHandler(BaseEventHandler):
                             body_phase="high_desire",
                             phase_until=0.0,
                         )
-                    elif state.n >= 5:
+                    elif _is_broken_stage(state.n, config):
                         exit_reason = "broken_exit"
                         body_state = SISPBodyState(
                             body_phase="extreme_fatigue",
@@ -684,20 +725,15 @@ class SISPStateHandler(BaseEventHandler):
             return EventDecision.SUCCESS, params
 
         # 状态分流：基于 n
-        # 享受期 n=1/2/3（3次高潮机会）→ 求饶期 n=4 → 玩坏期 n>4
-        if state.n > 4:
+        # n 表示完成的享受期高潮次数；达到配置上限后的下一轮求饶，再下一轮玩坏。
+        if _is_broken_stage(state.n, config):
             # C. 玩坏期：broken 常驻注入，但高潮事件仍可循环触发（n 不再递增）
             state.x += score
             logger.info(f"[sisp] stream={stream_id[:8]} 玩坏期积累 x={state.x:.1f} / U={state.U:.1f}")
 
             if state.x >= state.U:
                 y = state.k * state.x
-                if y <= 16.25:
-                    state.current_event = "mild_climax"
-                elif y <= 71.26:
-                    state.current_event = "normal_climax"
-                else:
-                    state.current_event = "intense_climax"
+                state.current_event = _climax_event_for_y(y, config)
 
                 if config.plugin.debug_log:
                     logger.info(
@@ -708,31 +744,26 @@ class SISPStateHandler(BaseEventHandler):
                 state.climax_count += 1
                 state.reset_after_climax()  # 重置 x/k/U，n 不变
 
-        elif state.n == 4:
+        elif _is_beg_stage(state.n, config):
             # B. 求饶期：先宣告 beg，下一条消息再升入玩坏期。
-            # 不能在同一轮既把 n 升为 5（触发 broken 注入）又设置 current_event="beg"，
+            # 不能在同一轮既把 n 升为玩坏期（触发 broken 注入）又设置 current_event="beg"，
             # 否则注入器会同帧注入互相矛盾的 broken + beg 提示词。
             if not state.beg_announced:
-                # 首次进入求饶期：只公告事件，n 保持 4
+                # 首次进入求饶期：只公告事件，n 保持在上限后的第一个值。
                 state.current_event = "beg"
                 state.beg_announced = True
-            elif score > 0:
+            elif score > thresholds.beg_progress_score_min_exclusive:
                 # beg 已在上一轮宣告，本轮才升入玩坏期
                 state.n += 1  # → 玩坏期（下轮生效）
 
         else:
-            # A. 享受期（n <= 3）：正常积累，共 3 次高潮机会
+            # A. 享受期：正常积累，直到 n 达到求饶期阈值
             state.x += score
             logger.info(f"[sisp] stream={stream_id[:8]} 享受期积累 x={state.x:.1f} / U={state.U:.1f}")
 
             if state.x >= state.U:
                 y = state.k * state.x
-                if y <= 16.25:
-                    state.current_event = "mild_climax"
-                elif y <= 71.26:
-                    state.current_event = "normal_climax"
-                else:
-                    state.current_event = "intense_climax"
+                state.current_event = _climax_event_for_y(y, config)
 
                 if config.plugin.debug_log:
                     logger.info(
@@ -811,6 +842,7 @@ class SISPPromptInjector(BaseEventHandler):
             loaded_body_state,
             durations=_get_stage_durations(config),
         )
+        beg_promoted = _advance_beg_to_broken(state, config)
 
         if body_state.to_dict() != loaded_body_state.to_dict():
             await save_body_state(stream_id, body_state)
@@ -828,7 +860,7 @@ class SISPPromptInjector(BaseEventHandler):
 
             passive_mode = _is_fatigue_phase(body_state)
             if not passive_mode:
-                if state.n > 4:
+                if _is_broken_stage(state.n, config):
                     inject_parts.append(p.broken)
 
                 event = state.current_event
@@ -841,6 +873,9 @@ class SISPPromptInjector(BaseEventHandler):
                 if event and event in event_map:
                     inject_parts.append(event_map[event])
                     state.current_event = None
+                    beg_promoted = _advance_beg_to_broken(state, config) or beg_promoted
+
+                if beg_promoted:
                     await save_state(stream_id, state)
         else:
             body_prompt = _body_phase_prompt(config, body_state, in_sex_mode=False)

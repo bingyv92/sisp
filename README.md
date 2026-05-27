@@ -102,6 +102,20 @@ user_targets = ["你的QQ号"]
 3. `none_cooldown_hours`：正常恢复期持续多久。
 4. `mild_desire_hours`：轻度欲望持续多久。
 
+### `[thresholds]`
+
+这一段控制状态机的判定阈值。默认值等同于旧版本硬编码逻辑。
+
+1. `entry_score_min`：未进入过程时，多少分以上开始累计前戏次数。
+2. `entry_required_count`：普通阶段需要连续多少次高分才进入过程。
+3. `high_desire_entry_required_count`：高欲望阶段需要连续多少次高分才进入过程。
+4. `low_score_max_exclusive`：过程中的低意愿分数上限，不含这个值。
+5. `low_score_exit_count`：连续低意愿多少次后退出过程。
+6. `enjoyment_climax_count`：享受期最多允许几次高潮。默认 `3` 表示三次高潮后进入求饶期，求饶后一轮再进入玩坏期。
+7. `beg_progress_score_min_exclusive`：求饶已宣告后，分数大于多少才推进到玩坏期。
+8. `mild_climax_y_max`：轻度高潮的 `y` 值上限。
+9. `normal_climax_y_max`：标准高潮的 `y` 值上限，超过后为强烈高潮。
+
 ### `[prompts]`
 
 这一段是“每个阶段要注入给机器人的提示词”。

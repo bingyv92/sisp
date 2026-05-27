@@ -1,7 +1,7 @@
 {
     "name": "sisp",
-    "version": "1.0.0",
-    "description": "性交互动模拟插件，通过数学模型驱动多阶段状态机并向 LLM 动态注入提示词",
+    "version": "1.1.0",
+    "description": "nsfw模拟插件，通过数学模型驱动多阶段状态机并向 LLM 动态注入提示词",
     "author": "",
     "dependencies": {
         "plugins": [],
