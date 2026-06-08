@@ -461,6 +461,15 @@ def _advance_beg_to_broken(state: SISPState, config: "SISPConfig") -> bool:
     return True
 
 
+def _clear_stale_climax_event(state: SISPState) -> bool:
+    """清理上一轮未消费的一次性高潮事件，返回是否发生清理。"""
+    if state.current_event not in {"mild_climax", "normal_climax", "intense_climax"}:
+        return False
+
+    state.current_event = None
+    return True
+
+
 def _body_phase_prompt(
     config: "SISPConfig",
     body_state: SISPBodyState,
@@ -600,6 +609,8 @@ class SISPStateHandler(BaseEventHandler):
         loaded_body_state = await load_body_state(stream_id)
         stage_durations = _get_stage_durations(config)
         body_state = advance_body_phase(loaded_body_state, durations=stage_durations)
+        if _clear_stale_climax_event(state):
+            await save_state(stream_id, state)
         if _advance_beg_to_broken(state, config):
             await save_state(stream_id, state)
         model_name = config.plugin.score_model
@@ -874,8 +885,9 @@ class SISPPromptInjector(BaseEventHandler):
                     inject_parts.append(event_map[event])
                     state.current_event = None
                     beg_promoted = _advance_beg_to_broken(state, config) or beg_promoted
+                    await save_state(stream_id, state)
 
-                if beg_promoted:
+                elif beg_promoted:
                     await save_state(stream_id, state)
         else:
             body_prompt = _body_phase_prompt(config, body_state, in_sex_mode=False)
